@@ -19,7 +19,9 @@ image ships it. `image/Dockerfile` extends the Docker Official Drupal image
 (PHP-FPM on Alpine, with Drupal's Composer project in `/opt/drupal`):
 
 - `composer require` of `drupal/core-recommended` pinned to
-  `DRUPAL_VERSION`, `drupal/commerce` (`COMMERCE_VERSION`), `drush/drush`
+  `DRUPAL_VERSION` (with `drupal/core-composer-scaffold` pinned too: the
+  base image's project requires it on its own, so its version wouldn't
+  follow `DRUPAL_VERSION`), `drupal/commerce` (`COMMERCE_VERSION`), `drush/drush`
   (`DRUSH_VERSION`) and any `DRUPAL_EXTRA_PACKAGES`;
 - the `bcmath` extension (required by Commerce) and APCu (recommended by
   Drupal's status report); the base image already has gd, opcache,
@@ -286,7 +288,10 @@ Notes:
 - Behind Caddy (and Traefik), Drupal trusts the proxy headers from its only
   client, Caddy, which sends the real client IP and scheme: links and
   session cookies follow the public `https://` address (`SSESS...`,
-  `Secure`).
+  `Secure`). The trusted proxy is the direct peer (`REMOTE_ADDR`), not a
+  list of private ranges: Caddy sets `REMOTE_ADDR` to the client's IP,
+  which a range list wouldn't match for public clients, and links would be
+  `http://` behind Traefik.
 - From inside the containers, the host machine is reachable as
   `host.docker.internal`.
 
