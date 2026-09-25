@@ -1,0 +1,101 @@
+# Caddy in front of Drupal's PHP-FPM: TLS, static files, the front controller
+# and security headers (from Drupal's recommended nginx configuration and its
+# .htaccess rules).
+#
+# /srv/web is the image's web root (copied to the `web` volume by setup) with
+# the files volume mounted at sites/default/files. PHP runs in the `php`
+# container, where the same files are under /opt/drupal/web.
+{
+	# No admin API: config is static, reloads happen by restarting the container.
+	admin off
+
+	servers {
+		# Behind a reverse proxy on a private network, log the real client IP
+		# (X-Forwarded-For) and pass X-Forwarded-Proto on to Drupal.
+		trusted_proxies static private_ranges
+		# Client IP = the right-most untrusted address (can't be spoofed).
+		trusted_proxies_strict
+	}
+}
+
+# Proxy headers that PHP apps read directly (order IPs, login logs...)
+# instead of REMOTE_ADDR: only the real client IP, never what the client
+# sent (php_fastcgi would pass the whole, forgeable X-Forwarded-For chain).
+(client_ip_headers) {
+	header_up X-Forwarded-For {client_ip}
+	header_up X-Real-IP {client_ip}
+	header_up -Client-Ip
+	header_up -Cf-Connecting-Ip
+	# Caddy doesn't reset X-Forwarded-Port (unlike -For/-Proto/-Host) for
+	# untrusted clients, and apps that trust Caddy would build URLs with a
+	# forged port; the port is in the Host header anyway.
+	header_up -X-Forwarded-Port
+}
+
+(drupal) {
+	root * /srv/web
+	encode zstd gzip
+
+	request_body {
+		max_size {$UPLOAD_MAX_SIZE}
+	}
+
+	# One directive per header: in a single `header { }` block, Caddy applies
+	# the "?" (set if missing) fields together, only when all are missing.
+	header ?X-Content-Type-Options nosniff
+	header ?X-Frame-Options SAMEORIGIN
+	header ?Referrer-Policy strict-origin-when-cross-origin
+	header -Server
+	header -X-Powered-By
+
+	# Never served: dotfiles (but .well-known), PHP other than the front
+	# controller (installer, update.php and rebuild.php included: setup runs
+	# the updates with drush), PHP in uploads and source/configuration files.
+	@blocked {
+		path /.* */.* *.php
+		path *.engine *.inc *.install *.make *.module *.profile *.po *.sh *.sql *.theme *.twig *.tpl *.xtmpl *.yml *.yaml *.bak *.orig *.save *.swp
+		path /composer.json /composer.lock /web.config /sites/*/settings*.php /sites/*/services*.yml
+		not path /.well-known/* /index.php
+	}
+	handle @blocked {
+		respond 404
+	}
+	# Text files of the code that tell the exact version (core/CHANGELOG.txt,
+	# README.md...); uploaded ones (sites/*/files) are served.
+	@docs {
+		path *.txt *.md
+		not path /robots.txt /sites/*/files/*
+	}
+	handle @docs {
+		respond 404
+	}
+
+	@static path /core/* /modules/* /themes/* /profiles/* /libraries/* /sites/default/files/*
+	header @static Cache-Control "public, max-age=604800"
+
+	# Existing files are served; everything else (routes, image styles not
+	# generated yet) goes to index.php.
+	handle {
+		php_fastcgi php:9000 {
+			root /opt/drupal/web
+			env REMOTE_ADDR {client_ip}
+			import client_ip_headers
+		}
+		file_server
+	}
+}
+
+# Public site. SITE_ADDRESS is ":80" for plain HTTP (local, or behind another
+# proxy) or a domain name, which makes Caddy obtain and renew a certificate
+# automatically ("localhost" uses Caddy's internal CA).
+{$SITE_ADDRESS} {
+	import drupal
+	log {
+		output stdout
+	}
+}
+
+# Internal-only site (port not published) for the container healthcheck.
+:8080 {
+	import drupal
+}

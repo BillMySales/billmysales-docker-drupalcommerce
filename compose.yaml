@@ -1,0 +1,294 @@
+# Drupal Commerce stack: Caddy (TLS, static files) + Drupal with Commerce
+# (own image from image/: the Docker Official Drupal image plus Commerce and
+# Drush) + MariaDB, with setup and cron services and optional backups and
+# Mailpit.
+#
+# Quick start (development):
+#   cp .env.dev.example .env
+#   docker compose up -d --build
+#   docker compose logs -f setup   # wait for "==> Done"
+#
+# Production: start from .env.prod.example instead. See README.md.
+#
+# Required variables have no default: compose refuses to start without them.
+
+name: ${COMPOSE_PROJECT_NAME:-drupalcommerce}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: "${LOG_MAX_FILE:-3}"
+
+# The Drupal image (image/Dockerfile), shared by setup, php, cron and console.
+x-drupal: &drupal
+  image: ${DRUPAL_IMAGE:-drupalcommerce-fpm}:${DRUPAL_VERSION:-11.4.7}-${COMMERCE_VERSION:-3.3.10}-php${PHP_VERSION:-8.5}
+  build:
+    context: ./image
+    args:
+      DRUPAL_VERSION: ${DRUPAL_VERSION:-11.4.7}
+      COMMERCE_VERSION: ${COMMERCE_VERSION:-3.3.10}
+      PHP_VERSION: ${PHP_VERSION:-8.5}
+      DRUSH_VERSION: ${DRUSH_VERSION:-13.8.0}
+      DRUPAL_EXTRA_PACKAGES: ${DRUPAL_EXTRA_PACKAGES:-}
+  logging: *logging
+
+x-drupal-env: &drupal-env
+  DRUPAL_URL: ${DRUPAL_URL:?Set DRUPAL_URL in .env (e.g. https://shop.example.com)}
+  DRUPAL_EXTRA_HOSTS: ${DRUPAL_EXTRA_HOSTS:-}
+  DRUPAL_HASH_SALT: ${DRUPAL_HASH_SALT:?Set DRUPAL_HASH_SALT in .env}
+  # hide (production), some, all or verbose (errors shown on the page).
+  DRUPAL_ERROR_LEVEL: ${DRUPAL_ERROR_LEVEL:-hide}
+  DB_HOST: db
+  DB_PORT: 3306
+  DB_NAME: ${DB_NAME:-drupal}
+  DB_USER: ${DB_USER:-drupal}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_SECURE: ${SMTP_SECURE:-tls}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-512M}
+  PHP_DISPLAY_ERRORS: ${PHP_DISPLAY_ERRORS:-Off}
+  PHP_OPCACHE_VALIDATE_TIMESTAMPS: ${PHP_OPCACHE_VALIDATE_TIMESTAMPS:-0}
+  PHP_MAX_EXECUTION_TIME: ${PHP_MAX_EXECUTION_TIME:-120}
+  UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-32M}
+  TZ: ${TIMEZONE:-America/Santiago}
+  # Drush builds absolute URLs (emails sent from cron) with this.
+  DRUSH_OPTIONS_URI: ${DRUPAL_URL:?Set DRUPAL_URL in .env (e.g. https://shop.example.com)}
+
+x-drupal-volumes: &drupal-volumes
+  - files:/opt/drupal/web/sites/default/files
+  - private:/var/www/private
+  - ./config/drupal/settings.php:/opt/drupal/web/sites/default/settings.php:ro
+  - ./config/php/php.ini:/usr/local/etc/php/conf.d/zz-stack.ini:ro
+  - ./scripts:/usr/local/share/stack/scripts:ro
+
+services:
+  db:
+    image: mariadb:${MARIADB_VERSION:-12.3}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-drupal}
+      MARIADB_USER: ${DB_USER:-drupal}
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEMORY_LIMIT:-1g}
+
+  # One-shot job: web root for Caddy, install (drush site:install) or
+  # database updates, Commerce store settings. Safe to repeat.
+  setup:
+    <<: *drupal
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *drupal-env
+      DRUPAL_ADMIN_USER: ${DRUPAL_ADMIN_USER:-admin}
+      DRUPAL_ADMIN_EMAIL: ${DRUPAL_ADMIN_EMAIL:?Set DRUPAL_ADMIN_EMAIL in .env}
+      DRUPAL_ADMIN_PASSWORD: ${DRUPAL_ADMIN_PASSWORD:?Set DRUPAL_ADMIN_PASSWORD in .env}
+      DRUPAL_SITE_NAME: ${DRUPAL_SITE_NAME:-Drupal Commerce}
+      DRUPAL_LOCALE: ${DRUPAL_LOCALE:-es}
+      COMMERCE_CURRENCY: ${COMMERCE_CURRENCY:-CLP}
+      COMMERCE_COUNTRY: ${COMMERCE_COUNTRY:-CL}
+      COMMERCE_CITY: ${COMMERCE_CITY:-Santiago}
+      COMMERCE_TAX_RATE: ${COMMERCE_TAX_RATE-19}
+      COMMERCE_TAX_NAME: ${COMMERCE_TAX_NAME:-IVA}
+      COMMERCE_PRICES_INCLUDE_TAX: ${COMMERCE_PRICES_INCLUDE_TAX:-true}
+    volumes:
+      - files:/opt/drupal/web/sites/default/files
+      - private:/var/www/private
+      - web:/srv/web
+      - ./config/drupal/settings.php:/opt/drupal/web/sites/default/settings.php:ro
+      - ./config/php/php.ini:/usr/local/etc/php/conf.d/zz-stack.ini:ro
+      - ./scripts:/usr/local/share/stack/scripts:ro
+    entrypoint: ["sh", "/usr/local/share/stack/scripts/setup.sh"]
+    deploy:
+      resources:
+        limits:
+          memory: ${SETUP_MEMORY_LIMIT:-1g}
+
+  # PHP-FPM (internal port 9000).
+  php:
+    <<: *drupal
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *drupal-env
+      PHP_FPM_MAX_CHILDREN: ${PHP_FPM_MAX_CHILDREN:-10}
+      PHP_FPM_START_SERVERS: ${PHP_FPM_START_SERVERS:-2}
+      PHP_FPM_MIN_SPARE_SERVERS: ${PHP_FPM_MIN_SPARE_SERVERS:-1}
+      PHP_FPM_MAX_SPARE_SERVERS: ${PHP_FPM_MAX_SPARE_SERVERS:-4}
+      PHP_FPM_MAX_REQUESTS: ${PHP_FPM_MAX_REQUESTS:-500}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - files:/opt/drupal/web/sites/default/files
+      - private:/var/www/private
+      - ./config/drupal/settings.php:/opt/drupal/web/sites/default/settings.php:ro
+      - ./config/php/php.ini:/usr/local/etc/php/conf.d/zz-stack.ini:ro
+      - ./config/php/fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-stack.conf:ro
+      - ./scripts:/usr/local/share/stack/scripts:ro
+    command: ["php-fpm"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q php-fpm /proc/1/cmdline"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: ${PHP_MEMORY_LIMIT_CONTAINER:-1g}
+
+  # Drupal's cron (queues, cleanup, Commerce's order and cart jobs) every
+  # CRON_INTERVAL seconds.
+  cron:
+    <<: *drupal
+    restart: unless-stopped
+    user: www-data
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *drupal-env
+      CRON_INTERVAL: ${CRON_INTERVAL:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: *drupal-volumes
+    entrypoint: ["sh", "/usr/local/share/stack/scripts/cron.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "find /tmp/cron-heartbeat -mmin -$$(( $${CRON_INTERVAL} / 60 + 10 )) | grep -q ."]
+      interval: 1m
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+    deploy:
+      resources:
+        limits:
+          memory: ${CRON_MEMORY_LIMIT:-512m}
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2.11}-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      php:
+        condition: service_healthy
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-32M}
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-80}:80"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - web:/srv/web:ro
+      - files:/srv/web/sites/default/files:ro
+      # TLS certificates and keys (keep them: ACME rate limits).
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/core/misc/favicon.ico"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: ${CADDY_MEMORY_LIMIT:-256m}
+
+  # Drush (profile "tools"), as www-data, e.g.:
+  #   docker compose run --rm console user:password admin 'new-password'
+  console:
+    <<: *drupal
+    profiles: ["tools"]
+    user: www-data
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *drupal-env
+    volumes: *drupal-volumes
+    entrypoint: ["drush"]
+    command: ["status"]
+    deploy:
+      resources:
+        limits:
+          memory: ${CONSOLE_MEMORY_LIMIT:-1g}
+
+  # Optional (profile "backup"): database dump + files every
+  # BACKUP_INTERVAL_HOURS, kept BACKUP_KEEP_DAYS days in the `backups` volume
+  # (overrides/local-dirs.yaml puts them in a local directory instead).
+  backup:
+    image: mariadb:${MARIADB_VERSION:-12.3}
+    profiles: ["backup"]
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-drupal}
+      DB_USER: ${DB_USER:-drupal}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    volumes:
+      # Read-write so `backup.sh restore` can put them back.
+      - files:/data/files
+      - private:/data/private
+      - backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/backup.sh"]
+    healthcheck:
+      test: ["CMD", "bash", "/usr/local/bin/backup.sh", "health"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKUP_MEMORY_LIMIT:-512m}
+
+  # Optional (profile "mailpit", development): catches all outgoing mail.
+  # Set SMTP_HOST=mailpit and SMTP_PORT=1025; web UI on MAILPIT_PORT.
+  mailpit:
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31}
+    profiles: ["mailpit"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${MAILPIT_PORT:-8025}:8025"
+
+volumes:
+  db_data:
+  files:
+  private:
+  web:
+  caddy_data:
+  caddy_config:
+  backups:

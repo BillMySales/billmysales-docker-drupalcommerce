@@ -1,0 +1,45 @@
+# Keep the stack's data in local directories instead of named volumes, so it
+# is visible from the host (and easy to include in host-level backups).
+#
+# In .env:
+#   COMPOSE_FILE=compose.yaml:overrides/local-dirs.yaml
+#   DATA_DIR=./data        # optional, default ./data (relative to compose.yaml)
+#
+# Only the directories you keep here change; delete the lines you don't need
+# (e.g. keep just `files`, `private` and `backups`). Existing data in the
+# named volumes is NOT moved: switch before the first `up`, or restore a
+# backup afterwards. `web` holds only files copied from the image (setup
+# copies them again when the image changes). `setup` gives `files` and
+# `private` to www-data (UID 82) on every run, also on Linux. Backup files are
+# root-owned with mode 0600.
+
+x-drupal-dirs: &drupal-dirs
+  - ${DATA_DIR:-./data}/files:/opt/drupal/web/sites/default/files
+  - ${DATA_DIR:-./data}/private:/var/www/private
+
+services:
+  db:
+    volumes:
+      - ${DATA_DIR:-./data}/db:/var/lib/mysql
+  setup:
+    volumes:
+      - ${DATA_DIR:-./data}/files:/opt/drupal/web/sites/default/files
+      - ${DATA_DIR:-./data}/private:/var/www/private
+      - ${DATA_DIR:-./data}/web:/srv/web
+  php:
+    volumes: *drupal-dirs
+  cron:
+    volumes: *drupal-dirs
+  console:
+    volumes: *drupal-dirs
+  caddy:
+    volumes:
+      - ${DATA_DIR:-./data}/web:/srv/web:ro
+      - ${DATA_DIR:-./data}/files:/srv/web/sites/default/files:ro
+      - ${DATA_DIR:-./data}/caddy/data:/data
+      - ${DATA_DIR:-./data}/caddy/config:/config
+  backup:
+    volumes:
+      - ${DATA_DIR:-./data}/files:/data/files
+      - ${DATA_DIR:-./data}/private:/data/private
+      - ${DATA_DIR:-./data}/backups:/backups

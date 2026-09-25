@@ -1,0 +1,37 @@
+# Develop a custom Drupal module from the host: mounts MODULE_PATH at
+# web/modules/custom/MODULE_NAME in every container that runs Drupal, and
+# read-only in Caddy (the module's CSS, JS and images).
+#
+# In .env:
+#   COMPOSE_FILE=compose.yaml:overrides/module.yaml
+#   MODULE_PATH=../my_module     # the module's directory (with <name>.info.yml)
+#   MODULE_NAME=my_module        # its machine name
+#
+# Then enable it once:
+#   docker compose exec -u www-data php drush pm:install my_module
+# PHP-FPM checks PHP files for changes (PHP_OPCACHE_VALIDATE_TIMESTAMPS=1);
+# Twig, YAML and new hooks/services need `drush cache:rebuild`.
+
+x-module: &module ${MODULE_PATH:?Set MODULE_PATH in .env}:/opt/drupal/web/modules/custom/${MODULE_NAME:?Set MODULE_NAME in .env}
+
+services:
+  setup:
+    environment:
+      # setup creates the mount point in Caddy's read-only web root.
+      MODULE_NAME: ${MODULE_NAME}
+    volumes:
+      - *module
+  php:
+    environment:
+      PHP_OPCACHE_VALIDATE_TIMESTAMPS: 1
+    volumes:
+      - *module
+  cron:
+    volumes:
+      - *module
+  console:
+    volumes:
+      - *module
+  caddy:
+    volumes:
+      - ${MODULE_PATH}:/srv/web/modules/custom/${MODULE_NAME}:ro
