@@ -63,9 +63,9 @@ Production
 
 ```shell
 cp .env.prod.example .env
-# Fill in DRUPAL_URL, SITE_ADDRESS, DRUPAL_HASH_SALT, DB_PASSWORD,
-# DB_ROOT_PASSWORD, DRUPAL_ADMIN_EMAIL, DRUPAL_ADMIN_PASSWORD and the SMTP_*
-# values.
+# Required: DRUPAL_URL, SITE_ADDRESS, DRUPAL_HASH_SALT, DB_PASSWORD,
+# DB_ROOT_PASSWORD, DRUPAL_ADMIN_EMAIL, DRUPAL_ADMIN_PASSWORD.
+# Recommended: the SMTP_* values (without SMTP_HOST no emails are sent).
 docker compose up -d --build
 ```
 
@@ -109,10 +109,12 @@ than `index.php` runs (no `install.php`, `update.php` or `rebuild.php`).
 - Empty database: `drush site:install standard` in `DRUPAL_LOCALE` (the
   admin is `DRUPAL_ADMIN_USER`, `DRUPAL_ADMIN_EMAIL`,
   `DRUPAL_ADMIN_PASSWORD`), then Commerce's modules: product, cart,
-  checkout, payment, tax, promotion. Otherwise: `drush updatedb` (a new
-  image).
-- `scripts/configure.php`, each item created only if missing (then kept as
-  edited in the admin):
+  checkout, payment, tax, promotion. Otherwise: `drush updatedb` (every
+  run; it only changes something after a new image).
+- `scripts/configure.php`, on every run, each item created only if missing
+  (then kept as edited in the admin; a new `COMMERCE_CURRENCY` or a renamed
+  `COMMERCE_TAX_NAME` creates another one, so change them in the admin, not
+  in `.env`, after the install):
   - the currency (`COMMERCE_CURRENCY`, CLP), with the symbol of the store's
     country (`$`; Drupal's `es` data says `CLP`);
   - the default store: `DRUPAL_SITE_NAME`, `COMMERCE_COUNTRY`,
@@ -164,8 +166,10 @@ Drupal and Commerce send them through core's Symfony Mailer: order receipts
 (Commerce), account emails, password resets, contact forms. SMTP comes from
 `SMTP_*` (`SMTP_SECURE`: `tls` = STARTTLS when the server offers it, `ssl` =
 SMTPS, `none` = never TLS); without `SMTP_HOST`, Drupal uses PHP's `mail()`,
-which the image can't deliver. The sender is `SMTP_FROM` (site and store
-email). Emails sent by cron build their links from `DRUPAL_URL`.
+which the image can't deliver. The sender is `SMTP_FROM`: the site's email on
+every request, the store's email only when the store is created (then edit
+it in the store's settings); without it, `DRUPAL_ADMIN_EMAIL`. Emails sent
+by cron build their links from `DRUPAL_URL`.
 
 Backups
 -------
@@ -260,7 +264,8 @@ Configuration
 Every variable is documented in `.env.prod.example`. Main groups:
 
 - **Site and network**: `DRUPAL_URL`, `DRUPAL_EXTRA_HOSTS`, `SITE_ADDRESS`,
-  `HTTP_BIND`, `HTTP_PORT`, `HTTPS_PORT`, `TIMEZONE`.
+  `HTTP_BIND`, `HTTP_PORT`, `HTTPS_PORT`, `TIMEZONE` (PHP's time zone on
+  every start; the site's and the store's only when the store is created).
 - **Credentials**: `DRUPAL_HASH_SALT`, `DB_PASSWORD`, `DB_ROOT_PASSWORD`,
   `DRUPAL_ADMIN_EMAIL`, `DRUPAL_ADMIN_PASSWORD` (required),
   `DRUPAL_ADMIN_USER`.

@@ -6,7 +6,7 @@
 #   volume when the image's build id changes.
 # - Empty database: `drush site:install standard` (DRUPAL_LOCALE: its
 #   translations are downloaded from localize.drupal.org) and Commerce's
-#   modules. Otherwise: `drush updatedb` (a new image) and cache rebuild.
+#   modules. Otherwise: `drush updatedb` (every run) and cache rebuild.
 # - scripts/configure.php: Commerce store settings (see there).
 set -eu
 cd /opt/drupal
